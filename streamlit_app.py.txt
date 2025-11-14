@@ -1,0 +1,155 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import requests
+from bs4 import BeautifulSoup
+import random
+from datetime import datetime
+
+# ---------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------
+st.set_page_config(page_title="GROK Flat Race Selector — Advanced", layout="wide")
+st.title("🐎 GROK — Universal Flat Race Selector (Advanced Pro Mode)")
+st.markdown("**Ante-Post + Day-of-Race | G1 to Maiden | Worldwide**")
+
+# ---------------------------------------------------------------
+# INPUT UI
+# ---------------------------------------------------------------
+col1, col2 = st.columns(2)
+with col1:
+    race_name = st.text_input("Race Name", "Irish 2000 Guineas")
+    race_date = st.date_input("Race Date", datetime(2025, 5, 24))
+    track = st.text_input("Track", "Curragh")
+with col2:
+    distance = st.text_input("Distance", "1m")
+    race_class = st.selectbox("Class", ["G1", "G2", "G3", "Listed", "Hcap", "Mdn"])
+
+phase = st.radio("Phase", ["Ante-Post (Early Entries)", "Day-of-Race (Final Decs)"])
+
+entries_url = st.text_input("Sporting Life Racecard URL")
+
+going_forecast = st.selectbox("Going (Day-of-Race only)", ["Good", "Good-Soft", "Soft", "Heavy", "Firm"], index=1)
+
+# ---------------------------------------------------------------
+# SPORTING LIFE SCRAPER
+# ---------------------------------------------------------------
+def scrape_sporting_life(url):
+    horses = []
+    try:
+        r = requests.get(url, timeout=10)
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        # Horse blocks
+        blocks = soup.find_all(attrs={"data-testid": "racecard-runner"})
+        for b in blocks:
+            name_tag = b.find(attrs={"data-testid": "horse-name"})
+            trainer_tag = b.find(attrs={"data-testid": "trainer-name"})
+            or_tag = b.find(attrs={"data-testid": "official-rating"})
+
+            name = name_tag.get_text(strip=True) if name_tag else "Unknown"
+            trainer = trainer_tag.get_text(strip=True) if trainer_tag else "Unknown"
+            or_rating = or_tag.get_text(strip=True).replace("OR ", "") if or_tag else "100"
+
+            horses.append({
+                "name": name,
+                "trainer": trainer,
+                "OR": or_rating
+            })
+    except:
+        pass
+
+    return horses
+
+# ---------------------------------------------------------------
+# ADVANCED SIMULATION ENGINE
+# ---------------------------------------------------------------
+def advanced_sim(horses_df, n_runs=1000, going_profile=None):
+    results = []
+
+    # Going weighting — user forecast + historical logic
+    if going_profile is None:
+        going_profile = [going_forecast] * 400 + ["Soft"] * 300 + ["Good"] * 200 + ["Heavy"] * 100
+
+    for _ in range(n_runs):
+        going = random.choice(going_profile)
+
+        field = horses_df.sample(frac=1).reset_index(drop=True)
+        ratings = field["OR"].astype(float).copy()
+
+        # Trainer influence
+        trainer_adj = np.random.normal(0, 2, len(field))
+        ratings += trainer_adj
+
+        # Going influence
+        if "Soft" in going:
+            ratings += np.random.normal(0, 4, len(field))
+        elif "Heavy" in going:
+            ratings += np.random.normal(0, 6, len(field))
+        else:
+            ratings += np.random.normal(0, 2, len(field))
+
+        # Random variance
+        ratings += np.random.normal(0, 4, len(field))
+
+        order = np.argsort(-ratings)
+        for pos, idx in enumerate(order):
+            results.append({"horse": field.iloc[idx]["name"], "pos": pos + 1})
+
+    return pd.DataFrame(results)
+
+# ---------------------------------------------------------------
+# RUN BUTTON
+# ---------------------------------------------------------------
+if st.button("🚀 RUN GROK PRO ANALYSIS"):
+    if not entries_url:
+        st.error("Please enter a Sporting Life racecard URL")
+    else:
+        with st.spinner("Scraping Sporting Life racecard..."):
+            horses = scrape_sporting_life(entries_url)
+
+        if not horses:
+            st.error("Could not extract any runners. Sporting Life HTML may have changed.")
+        else:
+            st.success(f"Found {len(horses)} runners")
+
+            df = pd.DataFrame(horses)
+            df["OR"] = pd.to_numeric(df["OR"], errors="coerce").fillna(100)
+
+            st.subheader("📋 Runners Extracted")
+            st.dataframe(df)
+
+            with st.spinner("Running advanced simulation (1000 runs)..."):
+                sim = advanced_sim(df, n_runs=1000)
+
+            summary = sim.groupby("horse").agg(
+                wins=("pos", lambda x: (x == 1).sum()),
+                places=("pos", lambda x: (x <= 3).sum()),
+                avg_finish=("pos", "mean")
+            ).round(2)
+            summary["win_pct"] = (summary["wins"] / 1000 * 100).round(1)
+            summary["place_pct"] = (summary["places"] / 1000 * 100).round(1)
+            summary = summary.sort_values("wins", ascending=False)
+
+            st.subheader("🏆 Simulation Results — Advanced Pro Mode")
+            st.dataframe(summary)
+
+            top3 = summary.head(3)
+            st.subheader("💰 BET SLIP (Copy-Paste Ready)")
+
+            bet_text = f"""
+**{race_name} — {race_date.strftime('%d %b %Y')} — {track} {distance} {race_class}**
+
+**£10 Win** — **{top3.index[0]}**
+**£5 E/W** — **{top3.index[1]}**
+**£5 E/W** — **{top3.index[2]}**
+
+**£1 Trifecta** — {top3.index[0]} / {top3.index[1]} / {top3.index[2]}
+
+**Going:** {going_forecast}
+**Field Size:** {len(df)} runners
+**Source:** {entries_url}
+"""
+
+            st.code(bet_text.strip())
+            st.download_button("Download Bet Slip", bet_text, f"{race_name.replace(' ', '_')}_bets.txt")
